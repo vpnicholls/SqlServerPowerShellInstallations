@@ -17,7 +17,7 @@
     The directory where event logs for this script should be saved.
 
     .PARAMETER HostServers
-    The host servers where SQL Server should be installed.
+    The names of host servers where SQL Server should be installed. (Support for IP addresses may be developed in the future).
 
     .PARAMETER DataDirectory
     The directory where user databases' data files should be created.
@@ -38,7 +38,7 @@
     The path where cumulative updates are saved.
     
     .PARAMETER SystemDatabases
-    A hastable of the master, ,model and msdb databases that includes:
+    A hastable of the master, model and msdb databases that includes:
     - database name
     - DataFileSizeMB
     - LogFileSizeMB
@@ -52,7 +52,7 @@
     A boolean to indicate whether the script is being run across a TailScale VPN connection.
 
     .EXAMPLE
-    .\InstallSQLServer-v2.0.ps1 -myCredential (Get-Credential) -EventLoggingDirectory "C:\Logs" -Environment "QA" -HostServers @("Server01", "Server02") -DataDirectory "E:\SQLData" -LogDirectory "F:\SQLLogs" -BackupDirectory "D:\Backup" -TempDBDirectory "T:\TempDB" -InstallPath "G:\SQLInstall" -UpdateSourcePath "D:\SQLUpdates" -ConnectWithTailScale $true
+    .\InstallSQLServer-v2.0.ps1 -myCredential (Get-Credential) -EventLoggingDirectory "C:\Logs" -HostServers @("Server01", "Server02") -DataDirectory "E:\SQLData" -LogDirectory "F:\SQLLogs" -BackupDirectory "D:\Backup" -TempDBDirectory "T:\TempDB" -InstallPath "G:\SQLInstall" -UpdateSourcePath "D:\SQLUpdates" -ConnectWithTailScale $true
 
     .LINK
     https://github.com/vpnicholls
@@ -65,14 +65,14 @@ Set-StrictMode -Version Latest
 param (
     [Parameter(Mandatory=$true)][PSCredential]$myCredential,
     [Parameter(Mandatory=$true)][string]$EventLoggingDirectory,
-    [Parameter(Mandatory=$true)][string[]]$HostServers,
+    [Parameter(Mandatory=$true)][ValidatePattern("^[a-zA-Z0-9-]+$")][string[]]$HostServers,
     [Parameter(Mandatory=$true)][string]$DataDirectory,
     [Parameter(Mandatory=$true)][string]$LogDirectory,
     [Parameter(Mandatory=$true)][string]$BackupDirectory,
     [Parameter(Mandatory=$true)][string]$TempDBDirectory,
     [Parameter(Mandatory=$true)][string]$InstallPath,
     [Parameter(Mandatory=$true)][string]$UpdateSourcePath,
-    [Parameter(Mandatory=$false)][hashtable[]]$SystemDatabases,
+    [Parameter(Mandatory=$true)][hashtable[]]$SystemDatabases,
     [Parameter(Mandatory=$false)][hashtable]$ConfigParams,
     [Parameter(Mandatory=$false)][bool]$ConnectWithTailScale = $false
 )
@@ -99,6 +99,7 @@ function Write-Log {
 function EnsureAdminPrivileges {
     [CmdletBinding()]
     param()
+    Write-Verbose "Starting EnsureAdminPrivileges function..."
     try {
         if (-Not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
             Write-Log "Script requires admin privileges. Attempting to restart with elevated privileges." -Level "WARNING"
@@ -108,24 +109,36 @@ function EnsureAdminPrivileges {
         }
     } catch {
         Write-Log -Message "Admin privileges are not being used. Please retry the script with Admin privileges. Error: $_" -Level ERROR
-    }
+    } finally {
+        Write-Verbose "Ending EnsureAdminPrivileges function..."
 }
 
 # Call this function immediately to ensure admin privileges early
+Write-Verbose "Starting EnsureAdminPrivileges function..."
 EnsureAdminPrivileges
+Write-Verbose "Ending EnsureAdminPrivileges function..."
 
-# Define the function for setting DbaToosConfig when connecting with TailScale
+<#
+    .SYNOPSIS
+    Configures dbatools to work with Tailscale if enabled.
+
+    .DESCRIPTION
+    This function modifies dbatools configurations to allow for unencrypted, trusted certificate connections when Tailscale is in use.
+#>
 function Set-DbatoolsConfigForTailscale {
     [CmdletBinding()]
     param (
         [bool]$EnableTailscale
     )
+    Write-Verbose "Starting Set-DbatoolsConfigForTailscale function..."
     if ($EnableTailscale) {
         try {
             Set-DbatoolsConfig -FullName sql.connection.trustcert -Value $true -Register
             Set-DbatoolsConfig -FullName sql.connection.encrypt -Value $false -Register
         } catch {
             Write-Log -Message "Failed to set DbaToolsConfig. Error: $_" -Level ERROR
+        } finally {
+            Write-Verbose "Ending Set-DbatoolsConfigForTailscale function..."
         }
     }
 }
@@ -149,24 +162,81 @@ function Create-DirectoryIfNotExists {
         [Parameter(Mandatory=$true)]
         [string]$Path
     )
+    Write-Verbose "Starting Create-DirectoryIfNotExists function..."
     if (-not (Test-Path $Path)) {
         try {
             New-Item -ItemType Directory -Path $Path  -ErrorAction Stop
             Write-Verbose "Successfully created directory at $Path"
         } catch {
             Write-Log -Message "Failed to create the directory at $Path. Error: $_" -Level ERROR
-            throw
+            throw $_
+        } finally {
+            Write-Verbose "Ending Create-DirectoryIfNotExists function..."
         }
     }
 }
 
+<#
+    .SYNOPSIS
+    Validates the configuration for system databases.
+
+    .DESCRIPTION
+    This function checks the $SystemDatabases parameter to ensure all required keys are present, 
+    the data types are correct, and values meet basic criteria like non-negative integers for sizes.
+
+    .PARAMETER SystemDatabases
+    An array of hashtables, each representing one system database (master, model, msdb) with:
+    - Database: Name of the database (string)
+    - DataFileSizeMB: Size of the data file in MB (integer)
+    - LogFileSizeMB: Size of the log file in MB (integer)
+    - LogFileSizeKB: Script block to calculate log file size in KB
+    - AllFilesGrowthMB: Growth increment for all files in MB (integer)
+    - LogicalFileName: Name used for files in the database (string)
+
+    .EXAMPLE
+    $SystemDatabases = @(
+        @{
+            Database = "master"; 
+            DataFileSizeMB = 64; 
+            LogFileSizeMB = 64; 
+            LogFileSizeKB = {$This.LogFileSizeMB * 1024};
+            AllFilesGrowthMB = 64;
+            LogicalFileName = 'master'
+        },
+        @{
+            Database = "model"; 
+            DataFileSizeMB = 128; 
+            LogFileSizeMB = 128; 
+            LogFileSizeKB = {$This.LogFileSizeMB * 1024};
+            AllFilesGrowthMB = 128;
+            LogicalFileName = 'modeldev'
+        },
+        @{
+            Database = "msdb";  
+            DataFileSizeMB = 128; 
+            LogFileSizeMB = 128; 
+            LogFileSizeKB = {$This.LogFileSizeMB * 1024};
+            AllFilesGrowthMB = 128;
+            LogicalFileName = 'MSDBData'
+        }
+    )
+    Validate-SystemDatabases -SystemDatabases $SystemDatabases
+
+    This example demonstrates how to define and validate system database configurations.
+
+    .NOTES
+    Author: Vaughan Nicholls
+    Date: 07 January 2025
+#>
 function Validate-SystemDatabases {
     param (
         [Parameter(Mandatory=$true)]
         [hashtable[]]$SystemDatabases
     )
-
+    Write-Verbose "Starting Validate-SystemDatabases function..."
+    Write-Verbose "Setting keys in Validate-SystemDatabases function..."
     $requiredKeys = @('Database', 'DataFileSizeMB', 'LogFileSizeMB', 'LogFileSizeKB', 'AllFilesGrowthMB', 'LogicalFileName')
+    Write-Verbose "Set keys in Validate-SystemDatabases function for <list databases here...>"
     
     foreach ($db in $SystemDatabases) {
         foreach ($key in $requiredKeys) {
@@ -193,28 +263,38 @@ function Validate-SystemDatabases {
     }
 }
 
-# Usage in your script
-if ($SystemDatabases) {
-    try {
-        Validate-SystemDatabases -SystemDatabases $SystemDatabases
-    } catch {
-        Write-Log -Message "Validation of SystemDatabases failed: $_" -Level ERROR
-        throw $_  # Re-throw the exception or handle it as needed
-    }
-} else {
-    # Handle case where no configuration is provided, maybe set defaults or throw an error
-    Write-Log -Message "No SystemDatabases configuration provided. Using defaults." -Level WARNING
-    # Define default configuration here
-}
+<#
+    .SYNOPSIS
+    Update system database sizes and associated settings.
 
-# Function to set system database sizes
+    .DESCRIPTION
+    This function:
+    - takes a hashtable of databases and associated size/growth settings
+    - sets the size of the data file
+    - sets the size of the log file
+    - sets the growth increment of both the data dn log files
+
+    .PARAMETER Instance
+    The instance to run the function against.
+
+    .PARAMETER SystemDatabase
+    The system database for which the size and settings are being updated.
+
+    .PARAMETER Credential
+    The credential to be used to connect to the SQL Server instances.
+
+    .PARAMETER LogPath
+    The directory path to check and potentially create.
+
+    .EXAMPLE
+    Set-SystemDatabaseSize -Instance SQL01 -SystemDatabase master -Credential $Credential 
+#>
 function Set-SystemDatabaseSize {
     [CmdletBinding()]
     param (
         [string]$Instance,
         [hashtable]$SystemDatabase,
-        [PSCredential]$Credential,
-        [string]$LogPath
+        [PSCredential]$Credential
     )
     $SysDatabase = $SystemDatabase.Database
     $DataFileMB = $SystemDatabase.DataFileSizeMB
@@ -224,32 +304,40 @@ function Set-SystemDatabaseSize {
     $FileName = $SystemDatabase.LogicalFileName
 
     # Set data file size
+    Write-Verbose "Setting '$dataFiles' for $SysDatabase in the Set-SystemDatabaseSize function..."
     $dataFiles = Get-DbaDbFile -SqlInstance $Instance -Database $SysDatabase -SqlCredential $Credential | Where-Object {$_.TypeDescription -eq "ROWS"}
+    Write-Verbose "The '$dataFiles' variable for $SysDatabase has been set to $dataFiles..."
     if ($dataFiles.Size -lt $DataFileMB) {
         Invoke-DbaQuery -SqlInstance $Instance -Database $SysDatabase -SqlCredential $Credential -Query "ALTER DATABASE [$SysDatabase] MODIFY FILE ( NAME = N'$FileName', SIZE = $DataFileMB MB )"
         Write-Log -Message "Set data file size for $SysDatabase on $Instance" -Level INFO
     }
 
     # Set log file size
+    Write-Verbose "Setting '$logFiles' for $SysDatabase in the Set-SystemDatabaseSize function..."
     $logFiles = Get-DbaDbFile -SqlInstance $Instance -Database $SysDatabase -SqlCredential $Credential | Where-Object {$_.TypeDescription -eq "LOG"}
+    Write-Verbose "The '$logFiles' variable for $SysDatabase has been set to $logFiles..."
     if ($logFiles.Size -lt $LogFileMB) {
         Expand-DbaDbLogFile -SqlInstance $Instance -Database $SysDatabase -TargetLogSize $LogFileMB -SqlCredential $Credential
         Write-Log -Message "Expanded log file size for $SysDatabase on $Instance" -Level INFO
     }
 
     # Set growth increment
+    Write-Verbose "Increasing file growth increments for $SysDatabase data and log files to $($FileGrowthMB)MB."
     Set-DbaDbFileGrowth -SqlInstance $Instance -Database $SysDatabase -GrowthType MB -Growth $FileGrowthMB -FileType All -SqlCredential $Credential
     Write-Log -Message "Set file growth for $SysDatabase on $Instance" -Level INFO
 }
 
 # Assuming the JSON file is in the same directory as your script
+Write-Verbose "Setting '$configFilePath'..."
 $configFilePath = Join-Path -Path $PSScriptRoot -ChildPath "SQLConfig.json"
+Write-Verbose "Set '$configFilePath' to $configFilePath..."
 
 if (Test-Path $configFilePath) {
+    Write-Verbose "Converting JSON config to hashtable..."
     $ConfigParams = Get-Content -Path $configFilePath -Raw | ConvertFrom-Json | ConvertTo-Hashtable
 } else {
-    Write-Log -Message "Configuration file not found at $configFilePath. The installation cannot proceed." -Level WARNING
-    throw
+    Write-Log -Message "Configuration file not found at $configFilePath. The installation cannot proceed." -Level ERROR
+    throw "Configuration file missing. Check $configFilePath."
 }
 
 # ConvertTo-Hashtable function to convert the JSON object to a hashtable since JSON does not natively support hashtables
@@ -277,13 +365,29 @@ function ConvertTo-Hashtable {
 }
 
 # Main execution
+Write-Verbose "Ensuring script is running with Admin privileges..."
 EnsureAdminPrivileges
+
+Write-Verbose "Setting security config if using Tailscale..."
 Set-DbatoolsConfigForTailscale -EnableTailscale $ConnectWithTailScale
 
+Write-Verbose "Creating required directories, if they don't already exist..."
 foreach ($directory in @($DataDirectory, $LogDirectory, $BackupDirectory)) {
     Create-DirectoryIfNotExists -Path $directory
 }
 
+Write-Verbose "Validating the '$SystemDatabases' hashtable parameter..."
+if ($SystemDatabases) {
+    try {
+        Validate-SystemDatabases -SystemDatabases $SystemDatabases
+    } catch {
+        Write-Log -Message "Validation of SystemDatabases failed: $_" -Level ERROR
+    }
+} else {
+    Write-Log -Message "No '$SystemDatabases' configuration provided. Investigate this and then re-run the script once resolved." -Level ERROR
+}
+
+Write-Verbose "Starting installation on host servers..."
 foreach ($hostServer in $HostServers) {
     $saCredential = Get-Credential -Message "Enter the 'sa' credentials for $hostServer"
     
@@ -309,13 +413,17 @@ foreach ($hostServer in $HostServers) {
             -EnableException
         } catch {
             Write-Log -Message "Failed to install SQL Server on $hostServer. Error: $_" -Level ERROR
-            throw
         }
 }
+Write-Verbose "Finished installation on all host servers."
 
 # Set system database sizes
+Write-Verbose "Starting to set system database sizes..."
 foreach ($Instance in $HostServers) {
     foreach ($SystemDatabase in $SystemDatabases) {
-        Set-SystemDatabaseSize -Instance $Instance -SystemDatabase $SystemDatabase -Credential $myCredential -logPath $logFileName
+        Set-SystemDatabaseSize -Instance $Instance -SystemDatabase $SystemDatabase -Credential $myCredential
     }
 }
+Write-Verbose "Finished setting system database sizes."
+
+Write-Log -Message "Script execution completed." -Level INFO
