@@ -19,6 +19,9 @@
     .PARAMETER HostServers
     The names of host servers where SQL Server should be installed. (Support for IP addresses may be developed in the future).
 
+    .PARAMETER Features
+    A hashtable where keys are host server names and values are arrays of features to install. Each feature must be one of the following: SQLENGINE, REPLICATION, FULLTEXT, AS, ASADVANCED, RS, RS_SHAREPOINT, IS, PYTHON, R, BIDS, CONN, BC, SDK, DOCS, TOOLS, DREPLAY_CONTROLLER, DREPLAY_CLIENT, MDS, DQC, DQ, POLYBASE, MLSERVICES.
+
     .PARAMETER DataDirectory
     The directory where user databases' data files should be created.
 
@@ -48,11 +51,45 @@
     .PARAMETER ConfigParams
     A hash table of configuration parameters to be passed to the installation.
 
+    .PARAMETER Version
+    The version of SQL Server to install. Valid values are 2008, 2008R2, 2012, 2014, 2016, 2017, 2019, 2022.
+
+    .PARAMETER Authentication
+    The authentication type for the installation process. Options are Basic, Windows, or SQL. Default is Basic.
+
+    .PARAMETER AuthenticationMode
+    The authentication mode for SQL Server. Options are Windows for Windows Authentication only or Mixed for both Windows and SQL Server Authentication. Default is Mixed.
+
+    .PARAMETER Port
+    The TCP port for SQL Server to listen on. Must be between 1 and 65535. Default is 1433. Note: Ports below 1024 might require administrative privileges to use.
+
+    .PARAMETER SqlCollation
+    The collation for the SQL Server instance. Default is SQL_Latin1_General_CP1_CI_AS.
+
     .PARAMETER ConnectWithTailScale
     A boolean to indicate whether the script is being run across a TailScale VPN connection.
 
     .EXAMPLE
-    .\InstallSQLServer-v2.0.ps1 -myCredential (Get-Credential) -EventLoggingDirectory "C:\Logs" -HostServers @("Server01", "Server02") -DataDirectory "E:\SQLData" -LogDirectory "F:\SQLLogs" -BackupDirectory "D:\Backup" -TempDBDirectory "T:\TempDB" -InstallPath "G:\SQLInstall" -UpdateSourcePath "D:\SQLUpdates" -ConnectWithTailScale $true
+    .\InstallSQLServer.ps1 -myCredential (Get-Credential) -EventLoggingDirectory "C:\Logs" -HostServers @("Server01", "Server02") -DataDirectory "E:\SQLData" -LogDirectory "F:\SQLLogs" -BackupDirectory "D:\Backup" -TempDBDirectory "T:\TempDB" -InstallPath "G:\SQLInstall" -UpdateSourcePath "D:\SQLUpdates" -ConnectWithTailScale $true
+
+    .EXAMPLE
+    $params = @{
+        myCredential = (Get-Credential)
+        EventLoggingDirectory = "C:\Logs"
+        HostServers = @("SQL01", "SQL02")
+        Features = @{
+            'SQL01' = @("SQLENGINE", "REPLICATION")
+            'SQL02' = @("SQLENGINE")
+        }
+        DataDirectory = "E:\SQLData"
+        LogDirectory = "F:\SQLLogs"
+        BackupDirectory = "D:\Backup"
+        TempDBDirectory = "T:\TempDB"
+        InstallPath = "G:\SQLInstall"
+        UpdateSourcePath = "D:\SQLUpdates"
+        ConnectWithTailScale = $true
+    }
+    .\InstallSQLServer.ps1 @params
 
     .LINK
     https://github.com/vpnicholls
@@ -62,10 +99,12 @@
 
 Set-StrictMode -Version Latest
 
+
 param (
     [Parameter(Mandatory=$true)][PSCredential]$myCredential,
     [Parameter(Mandatory=$true)][string]$EventLoggingDirectory,
     [Parameter(Mandatory=$true)][ValidatePattern("^[a-zA-Z0-9-]+$")][string[]]$HostServers,
+    [Parameter(Mandatory=$true)][hashtable]$Features,
     [Parameter(Mandatory=$true)][string]$DataDirectory,
     [Parameter(Mandatory=$true)][string]$LogDirectory,
     [Parameter(Mandatory=$true)][string]$BackupDirectory,
@@ -74,6 +113,11 @@ param (
     [Parameter(Mandatory=$true)][string]$UpdateSourcePath,
     [Parameter(Mandatory=$true)][hashtable[]]$SystemDatabases,
     [Parameter(Mandatory=$false)][hashtable]$ConfigParams,
+    [Parameter(Mandatory=$true)][ValidateSet("2008", "2008R2", "2012", "2014", "2016", "2017", "2019", "2022")][string]$Version,
+    [Parameter(Mandatory=$false)][ValidateSet("Default", "Basic", "Negotiate", "NegotiateWithImplicitCredential", "Credssp", "Digest", "Kerberos")][string]$Authentication = "Basic",
+    [Parameter(Mandatory=$false)][ValidateSet("Windows", "Mixed")][string]$AuthenticationMode = "Mixed",
+    [Parameter(Mandatory=$false)][ValidateRange(1, 65535)][int]$Port = 1433,
+    [Parameter(Mandatory=$true)][string]$SqlCollation,
     [Parameter(Mandatory=$false)][bool]$ConnectWithTailScale = $false
 )
 
@@ -287,7 +331,7 @@ function Validate-SystemDatabases {
     The directory path to check and potentially create.
 
     .EXAMPLE
-    Set-SystemDatabaseSize -Instance SQL01 -SystemDatabase master -Credential $Credential 
+    Set-SystemDatabaseSize -Instance SQL01 -SystemDatabase master -Credential $Credential
 #>
 function Set-SystemDatabaseSize {
     [CmdletBinding()]
@@ -371,6 +415,8 @@ EnsureAdminPrivileges
 Write-Verbose "Setting security config if using Tailscale..."
 Set-DbatoolsConfigForTailscale -EnableTailscale $ConnectWithTailScale
 
+$ValidFeatures = @("SQLENGINE", "REPLICATION", "FULLTEXT", "AS", "ASADVANCED", "RS", "RS_SHAREPOINT", "IS", "PYTHON", "R", "BIDS", "CONN", "BC", "SDK", "DOCS", "TOOLS", "DREPLAY_CONTROLLER", "DREPLAY_CLIENT", "MDS", "DQC", "DQ", "POLYBASE", "MLSERVICES")
+
 Write-Verbose "Creating required directories, if they don't already exist..."
 foreach ($directory in @($DataDirectory, $LogDirectory, $BackupDirectory)) {
     Create-DirectoryIfNotExists -Path $directory
@@ -390,14 +436,27 @@ if ($SystemDatabases) {
 Write-Verbose "Starting installation on host servers..."
 foreach ($hostServer in $HostServers) {
     $saCredential = Get-Credential -Message "Enter the 'sa' credentials for $hostServer"
-    
+    $IntanceFeatures = $Features[$hostServer]    
+        if ($null -eq $IntanceFeatures) {
+        Write-Log -Message "No features specified for $hostServer. Skipping installation." -Level WARNING
+        continue
+    }
+
+    # Validate features
+    foreach ($feature in $IntanceFeatures) {
+        if ($feature -notin $ValidFeatures) {
+            Write-Log -Message "Invalid feature '$feature' specified for $hostServer. Skipping this host." -Level ERROR
+            continue
+        }
+    }
+
     try {
         Install-DbaInstance -SqlInstance $hostServer `
-            -Version 2022 `
+            -Version $Version `
             -sacredential $saCredential `
-            -Authentication Basic `
-            -Feature Engine,Replication `
-            -AuthenticationMode Mixed `
+            -Authentication $Authentication `
+            -Feature $IntanceFeatures `
+            -AuthenticationMode $AuthenticationMode `
             -InstancePath $InstallPath `
             -DataPath $DataDirectory `
             -LogPath $LogDirectory `
@@ -405,8 +464,8 @@ foreach ($hostServer in $HostServers) {
             -BackupPath $BackupDirectory `
             -UpdateSourcePath $UpdateSourcePath `
             -AdminAccount $myCredential.UserName `
-            -Port '1433' `
-            -sqlcollation 'SQL_Latin1_General_CP1_CI_AS' `
+            -Port $Port `
+            -sqlcollation $SqlCollation `
             -PerformVolumeMaintenanceTasks `
             -Configuration $ConfigParams `
             -Restart `
