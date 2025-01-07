@@ -92,7 +92,7 @@
     .\InstallSQLServer.ps1 @params
 
     .LINK
-    https://github.com/vpnicholls
+    https://github.com/vpnicholls/SqlServerPowerShellInstallations
 #>
 
 # requires -Module dbatools
