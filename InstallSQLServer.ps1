@@ -1,4 +1,4 @@
-<#
+﻿<#
     .SYNOPSIS
     Installs SQL Server instance on one or more hosts. 
 
