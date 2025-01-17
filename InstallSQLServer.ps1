@@ -162,13 +162,8 @@ Write-Verbose "Starting EnsureAdminPrivileges function..."
 EnsureAdminPrivileges
 Write-Verbose "Ending EnsureAdminPrivileges function..."
 
-<#
-    .SYNOPSIS
-    Configures dbatools to work with Tailscale if enabled.
+# Define function to configure settings when connecting with Tailscale VPN
 
-    .DESCRIPTION
-    This function modifies dbatools configurations to allow for unencrypted, trusted certificate connections when Tailscale is in use.
-#>
 function Set-DbatoolsConfigForTailscale {
     [CmdletBinding()]
     param (
@@ -187,19 +182,7 @@ function Set-DbatoolsConfigForTailscale {
     }
 }
 
-<#
-    .SYNOPSIS
-    Creates a directory if it does not already exist.
-
-    .DESCRIPTION
-    Checks if the given directory path exists, and if not, attempts to create it.
-
-    .PARAMETER Path
-    The directory path to check and potentially create.
-
-    .EXAMPLE
-    Create-DirectoryIfNotExists -Path "C:\NewFolder"
-#>
+# Define funtion to create a directory if it does not already exist.
 function Create-DirectoryIfNotExists {
     [CmdletBinding()]
     param (
@@ -220,58 +203,7 @@ function Create-DirectoryIfNotExists {
     }
 }
 
-<#
-    .SYNOPSIS
-    Validates the configuration for system databases.
-
-    .DESCRIPTION
-    This function checks the $SystemDatabases parameter to ensure all required keys are present, 
-    the data types are correct, and values meet basic criteria like non-negative integers for sizes.
-
-    .PARAMETER SystemDatabases
-    An array of hashtables, each representing one system database (master, model, msdb) with:
-    - Database: Name of the database (string)
-    - DataFileSizeMB: Size of the data file in MB (integer)
-    - LogFileSizeMB: Size of the log file in MB (integer)
-    - LogFileSizeKB: Script block to calculate log file size in KB
-    - AllFilesGrowthMB: Growth increment for all files in MB (integer)
-    - LogicalFileName: Name used for files in the database (string)
-
-    .EXAMPLE
-    $SystemDatabases = @(
-        @{
-            Database = "master"; 
-            DataFileSizeMB = 64; 
-            LogFileSizeMB = 64; 
-            LogFileSizeKB = {$This.LogFileSizeMB * 1024};
-            AllFilesGrowthMB = 64;
-            LogicalFileName = 'master'
-        },
-        @{
-            Database = "model"; 
-            DataFileSizeMB = 128; 
-            LogFileSizeMB = 128; 
-            LogFileSizeKB = {$This.LogFileSizeMB * 1024};
-            AllFilesGrowthMB = 128;
-            LogicalFileName = 'modeldev'
-        },
-        @{
-            Database = "msdb";  
-            DataFileSizeMB = 128; 
-            LogFileSizeMB = 128; 
-            LogFileSizeKB = {$This.LogFileSizeMB * 1024};
-            AllFilesGrowthMB = 128;
-            LogicalFileName = 'MSDBData'
-        }
-    )
-    Validate-SystemDatabases -SystemDatabases $SystemDatabases
-
-    This example demonstrates how to define and validate system database configurations.
-
-    .NOTES
-    Author: Vaughan Nicholls
-    Date: 07 January 2025
-#>
+# Define function to validate the configuration for system databases
 function Validate-SystemDatabases {
     param (
         [Parameter(Mandatory=$true)]
@@ -307,32 +239,7 @@ function Validate-SystemDatabases {
     }
 }
 
-<#
-    .SYNOPSIS
-    Update system database sizes and associated settings.
-
-    .DESCRIPTION
-    This function:
-    - takes a hashtable of databases and associated size/growth settings
-    - sets the size of the data file
-    - sets the size of the log file
-    - sets the growth increment of both the data dn log files
-
-    .PARAMETER Instance
-    The instance to run the function against.
-
-    .PARAMETER SystemDatabase
-    The system database for which the size and settings are being updated.
-
-    .PARAMETER Credential
-    The credential to be used to connect to the SQL Server instances.
-
-    .PARAMETER LogPath
-    The directory path to check and potentially create.
-
-    .EXAMPLE
-    Set-SystemDatabaseSize -Instance SQL01 -SystemDatabase master -Credential $Credential
-#>
+# Define function to set the sizes and growth increments of the system databases.
 function Set-SystemDatabaseSize {
     [CmdletBinding()]
     param (
