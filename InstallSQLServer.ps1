@@ -51,6 +51,9 @@
     .PARAMETER ConfigParams
     A hash table of configuration parameters to be passed to the installation.
 
+    .PARAMETER PostInstallConfigurations
+    A hash table of post-installation configuration points that likely need updating from their defaults.
+
     .PARAMETER Version
     The version of SQL Server to install. Valid values are 2008, 2008R2, 2012, 2014, 2016, 2017, 2019, 2022.
 
@@ -92,6 +95,11 @@
         UpdateSourcePath = "D:\SQLUpdates"
         ConnectWithTailScale = $true
     }
+    $PostInstallConfigurations = @{
+        DefaultBackupCompression = 1
+        DefaultBackupChecksum = 1
+        CostThresholdForParallelism = 50
+    }
     .\InstallSQLServer.ps1 @params
 
     .LINK
@@ -115,12 +123,12 @@ param (
     [Parameter(Mandatory=$true)][string]$UpdateSourcePath,
     [Parameter(Mandatory=$true)][hashtable[]]$SystemDatabases,
     [Parameter(Mandatory=$false)][hashtable]$ConfigParams,
+    [Parameter(Mandatory=$false)][hashtable]$PostInstallConfigurations,
     [Parameter(Mandatory=$true)][ValidateSet("2008", "2008R2", "2012", "2014", "2016", "2017", "2019", "2022")][string]$Version,
     [Parameter(Mandatory=$false)][ValidateSet("Default", "Basic", "Negotiate", "NegotiateWithImplicitCredential", "Credssp", "Digest", "Kerberos")][string]$Authentication="Basic",
     [Parameter(Mandatory=$false)][ValidateSet("Windows", "Mixed")][string]$AuthenticationMode="Mixed",
     [Parameter(Mandatory=$false)][ValidateRange(1, 65535)][int]$Port = 1433,
     [Parameter(Mandatory=$true)][string]$SqlCollation,
-    [Parameter(Mandatory=$false)][bool]$EnableBackupCompression = $false,
     [Parameter(Mandatory=$false)][bool]$ConnectWithTailScale = $false
 )
 
@@ -319,21 +327,22 @@ function ConvertTo-Hashtable {
     }
 }
 
-# Define function to set backup compression at the instance-level
-function Set-BackupCompression {
+# Define function to set various SQL Server configuration points
+function Set-SqlServerConfigurations {
     [CmdletBinding()]
     param (
         [string]$Instance,
-        [bool]$EnableCompression,
+        [hashtable]$Configurations,
         [PSCredential]$Credential
     )
 
-    try {
-        $value = if ($EnableCompression) { 1 } else { 0 }
-        Set-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -Name DefaultBackupCompression -Value $value -EnableException
-        Write-Log -Message "Backup compression has been set to $('enabled' * $EnableCompression -replace '^0$', 'disabled') on $Instance." -Level INFO
-    } catch {
-        Write-Log -Message "Failed to set backup compression on $Instance. Error: $_" -Level ERROR
+    foreach ($configName in $Configurations.Keys) {
+        try {
+            Set-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -Name $configName -Value $Configurations[$configName] -EnableException
+            Write-Log -Message "SQL Server configuration '$configName' set to $($Configurations[$configName]) on $Instance." -Level INFO
+        } catch {
+            Write-Log -Message "Failed to set configuration '$configName' on $Instance. Error: $_" -Level ERROR
+        }
     }
 }
 
@@ -406,14 +415,18 @@ foreach ($hostServer in $HostServers) {
 Write-Verbose "Finished installation on all host servers."
 
 # Set system database sizes
-Write-Verbose "Starting post-installation configuration..."
+Write-Verbose "Starting configuration of system databases' sizes and growth increments..."
 foreach ($Instance in $HostServers) {
     foreach ($SystemDatabase in $SystemDatabases) {
         Set-SystemDatabaseSize -Instance $Instance -SystemDatabase $SystemDatabase -Credential $myCredential
     }
-    # Configure backup compression
-    Set-BackupCompression -Instance $Instance -EnableCompression $EnableBackupCompression -Credential $myCredential
 }
-Write-Verbose "Finished post-installation configuration."
+Write-Verbose "Finished configuration of system databases' sizes and growth increments..."
+
+Write-Verbose "Starting various post-installation configurations..."
+foreach ($Instance in $HostServers) {
+    Set-SqlServerConfigurations -Instance $Instance -Configurations $PostInstallConfigurations -Credential $myCredential
+}
+Write-Verbose "Starting various post-installation configurations..."
 
 Write-Log -Message "SQL Server installation and post-installation configuration has completed." -Level INFO
