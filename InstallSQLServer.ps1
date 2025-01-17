@@ -330,7 +330,7 @@ function Set-BackupCompression {
 
     try {
         $value = if ($EnableCompression) { 1 } else { 0 }
-        Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $Credential -Query "EXEC sp_configure 'backup compression default', $value; RECONFIGURE;" -EnableException
+        Set-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -Name DefaultBackupCompression -Value $value -EnableException
         Write-Log -Message "Backup compression has been set to $('enabled' * $EnableCompression -replace '^0$', 'disabled') on $Instance." -Level INFO
     } catch {
         Write-Log -Message "Failed to set backup compression on $Instance. Error: $_" -Level ERROR
