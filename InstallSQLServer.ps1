@@ -8,7 +8,7 @@
     - Sets suitable security settings if connecting across TailScale VPN.
     - Creates the necessary directories, if they do not already exist.
     - Installs SQL Server instance(s).
-    - Appropriate sets the size and growth settings for the master, model and msdb system databases.
+    - Appropriately sets the size and growth settings for the master, model and msdb system databases.
 
     .PARAMETER myCredential
     A credential that is to be used as a sysadmin account on the instances being installed.
@@ -66,6 +66,9 @@
     .PARAMETER SqlCollation
     The collation for the SQL Server instance. Default is SQL_Latin1_General_CP1_CI_AS.
 
+    .PARAMETER EnableBackupCompression
+    A boolean to indicate whether to enable backup compression by default. Defaults to true.
+
     .PARAMETER ConnectWithTailScale
     A boolean to indicate whether the script is being run across a TailScale VPN connection.
 
@@ -97,8 +100,7 @@
 
 # requires -Module dbatools
 
-Set-StrictMode -Version Latest
-
+# Set-StrictMode -Version Latest
 
 param (
     [Parameter(Mandatory=$true)][PSCredential]$myCredential,
@@ -114,10 +116,11 @@ param (
     [Parameter(Mandatory=$true)][hashtable[]]$SystemDatabases,
     [Parameter(Mandatory=$false)][hashtable]$ConfigParams,
     [Parameter(Mandatory=$true)][ValidateSet("2008", "2008R2", "2012", "2014", "2016", "2017", "2019", "2022")][string]$Version,
-    [Parameter(Mandatory=$false)][ValidateSet("Default", "Basic", "Negotiate", "NegotiateWithImplicitCredential", "Credssp", "Digest", "Kerberos")][string]$Authentication = "Basic",
-    [Parameter(Mandatory=$false)][ValidateSet("Windows", "Mixed")][string]$AuthenticationMode = "Mixed",
+    [Parameter(Mandatory=$false)][ValidateSet("Default", "Basic", "Negotiate", "NegotiateWithImplicitCredential", "Credssp", "Digest", "Kerberos")][string]$Authentication="Basic",
+    [Parameter(Mandatory=$false)][ValidateSet("Windows", "Mixed")][string]$AuthenticationMode="Mixed",
     [Parameter(Mandatory=$false)][ValidateRange(1, 65535)][int]$Port = 1433,
     [Parameter(Mandatory=$true)][string]$SqlCollation,
+    [Parameter(Mandatory=$false)][bool]$EnableBackupCompression = $false,
     [Parameter(Mandatory=$false)][bool]$ConnectWithTailScale = $false
 )
 
@@ -155,6 +158,7 @@ function EnsureAdminPrivileges {
         Write-Log -Message "Admin privileges are not being used. Please retry the script with Admin privileges. Error: $_" -Level ERROR
     } finally {
         Write-Verbose "Ending EnsureAdminPrivileges function..."
+    }
 }
 
 # Call this function immediately to ensure admin privileges early
@@ -315,6 +319,24 @@ function ConvertTo-Hashtable {
     }
 }
 
+# Define function to set backup compression at the instance-level
+function Set-BackupCompression {
+    [CmdletBinding()]
+    param (
+        [string]$Instance,
+        [bool]$EnableCompression,
+        [PSCredential]$Credential
+    )
+
+    try {
+        $value = if ($EnableCompression) { 1 } else { 0 }
+        Invoke-DbaQuery -SqlInstance $Instance -SqlCredential $Credential -Query "EXEC sp_configure 'backup compression default', $value; RECONFIGURE;" -EnableException
+        Write-Log -Message "Backup compression has been set to $('enabled' * $EnableCompression -replace '^0$', 'disabled') on $Instance." -Level INFO
+    } catch {
+        Write-Log -Message "Failed to set backup compression on $Instance. Error: $_" -Level ERROR
+    }
+}
+
 # Main execution
 Write-Verbose "Ensuring script is running with Admin privileges..."
 EnsureAdminPrivileges
@@ -384,12 +406,14 @@ foreach ($hostServer in $HostServers) {
 Write-Verbose "Finished installation on all host servers."
 
 # Set system database sizes
-Write-Verbose "Starting to set system database sizes..."
+Write-Verbose "Starting post-installation configuration..."
 foreach ($Instance in $HostServers) {
     foreach ($SystemDatabase in $SystemDatabases) {
         Set-SystemDatabaseSize -Instance $Instance -SystemDatabase $SystemDatabase -Credential $myCredential
     }
+    # Configure backup compression
+    Set-BackupCompression -Instance $Instance -EnableCompression $EnableBackupCompression -Credential $myCredential
 }
-Write-Verbose "Finished setting system database sizes."
+Write-Verbose "Finished post-installation configuration."
 
-Write-Log -Message "Script execution completed." -Level INFO
+Write-Log -Message "SQL Server installation and post-installation configuration has completed." -Level INFO
