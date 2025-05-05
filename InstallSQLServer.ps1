@@ -84,19 +84,46 @@
     .EXAMPLE
     $params = @{
         myCredential = (Get-Credential)
-        EventLoggingDirectory = "C:\Logs"
-        HostServers = @("SQL01", "SQL02")
+        EventLoggingDirectory = ".\Logs"
+        HostServers = @("SQL01")
         Features = @{
-            'SQL01' = @("SQLENGINE", "REPLICATION")
-            'SQL02' = @("SQLENGINE")
+            'SQL01' = @("Engine")
         }
         DataDirectory = "E:\SQLData"
         LogDirectory = "F:\SQLLogs"
         BackupDirectory = "D:\Backup"
         TempDBDirectory = "T:\TempDB"
-        InstanceDirectory "S:\Program Files\Microsoft SQL Server"
         InstallMediaPath = "G:"
-        UpdateSourcePath = "D:\SQLUpdates"
+        InstancePath = "S:\Program Files\Microsoft SQL Server"
+        UpdateSourcePath = "C:\temp\Updates"
+        Version = "2022"
+        SqlCollation = "SQL_Latin1_General_CP1_CI_AS"
+        SystemDatabases = @(
+            @{
+                Database = "master"
+                DataFileSizeMB = 64
+                LogFileSizeMB = 64
+                LogFileSizeKB = { 65536 }
+                AllFilesGrowthMB = 64
+                LogicalFileName = "master"
+            },
+            @{
+                Database = "model"
+                DataFileSizeMB = 128
+                LogFileSizeMB = 128
+                LogFileSizeKB = { 131072 }
+                AllFilesGrowthMB = 128
+                LogicalFileName = "modeldev"
+            },
+            @{
+                Database = "msdb"
+                DataFileSizeMB = 128
+                LogFileSizeMB = 128
+                LogFileSizeKB = { 131072 }
+                AllFilesGrowthMB = 128
+                LogicalFileName = "MSDBData"
+            }
+        )
         DisableEncryption = $true
     }
     $PostInstallConfigurations = @{
