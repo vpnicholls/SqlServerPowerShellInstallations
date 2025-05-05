@@ -1,4 +1,4 @@
-﻿<#
+<#
     .SYNOPSIS
     Installs SQL Server instance on one or more hosts. 
 
@@ -34,9 +34,12 @@
     .PARAMETER TempDBDirectory
     The directory where data and log files for tempdb will be saved.
     
-    .PARAMETER InstallPath
+    .PARAMETER InstanceDirectory
     The path where the installation media is saved.
-    
+        
+    .PARAMETER InstallMediaPath
+    The path where the installation media is saved.
+            
     .PARAMETER UpdateSourcePath
     The path where cumulative updates are saved.
     
@@ -72,11 +75,11 @@
     .PARAMETER EnableBackupCompression
     A boolean to indicate whether to enable backup compression by default. Defaults to true.
 
-    .PARAMETER ConnectWithTailScale
-    A boolean to indicate whether the script is being run across a TailScale VPN connection.
+    .PARAMETER DisableEncryption
+    A boolean to indicate whether encryption should be disabled for this installation via dbatools.
 
     .EXAMPLE
-    .\InstallSQLServer.ps1 -myCredential (Get-Credential) -EventLoggingDirectory "C:\Logs" -HostServers @("Server01", "Server02") -DataDirectory "E:\SQLData" -LogDirectory "F:\SQLLogs" -BackupDirectory "D:\Backup" -TempDBDirectory "T:\TempDB" -InstallPath "G:\SQLInstall" -UpdateSourcePath "D:\SQLUpdates" -ConnectWithTailScale $true
+    .\InstallSQLServer.ps1 -myCredential (Get-Credential) -EventLoggingDirectory "C:\Logs" -HostServers @("Server01", "Server02") -DataDirectory "E:\SQLData" -LogDirectory "F:\SQLLogs" -BackupDirectory "D:\Backup" -TempDBDirectory "T:\TempDB" -InstanceDirectory "S:\Program Files\Microsoft SQL Server" -UpdateSourcePath "D:\SQLUpdates" -ConnectWithTailScale $true
 
     .EXAMPLE
     $params = @{
@@ -91,9 +94,10 @@
         LogDirectory = "F:\SQLLogs"
         BackupDirectory = "D:\Backup"
         TempDBDirectory = "T:\TempDB"
-        InstallPath = "G:\SQLInstall"
+        InstanceDirectory "S:\Program Files\Microsoft SQL Server"
+        InstallMediaPath = "G:"
         UpdateSourcePath = "D:\SQLUpdates"
-        ConnectWithTailScale = $true
+        DisableEncryption = $true
     }
     $PostInstallConfigurations = @{
         DefaultBackupCompression = 1
@@ -119,7 +123,8 @@ param (
     [Parameter(Mandatory=$true)][string]$LogDirectory,
     [Parameter(Mandatory=$true)][string]$BackupDirectory,
     [Parameter(Mandatory=$true)][string]$TempDBDirectory,
-    [Parameter(Mandatory=$true)][string]$InstallPath,
+    [Parameter(Mandatory=$true)][string]$InstancePath,
+    [Parameter(Mandatory=$true)][string]$InstallMediaPath,
     [Parameter(Mandatory=$true)][string]$UpdateSourcePath,
     [Parameter(Mandatory=$true)][hashtable[]]$SystemDatabases,
     [Parameter(Mandatory=$false)][hashtable]$ConfigParams,
@@ -129,7 +134,7 @@ param (
     [Parameter(Mandatory=$false)][ValidateSet("Windows", "Mixed")][string]$AuthenticationMode="Mixed",
     [Parameter(Mandatory=$false)][ValidateRange(1, 65535)][int]$Port = 1433,
     [Parameter(Mandatory=$true)][string]$SqlCollation,
-    [Parameter(Mandatory=$false)][bool]$ConnectWithTailScale = $false
+    [Parameter(Mandatory=$true)][bool]$DisableEncryption
 )
 
 # Generate log file name with datetime stamp
@@ -174,24 +179,26 @@ Write-Verbose "Starting EnsureAdminPrivileges function..."
 EnsureAdminPrivileges
 Write-Verbose "Ending EnsureAdminPrivileges function..."
 
-# Define function to configure settings when connecting with Tailscale VPN
-
-function Set-DbatoolsConfigForTailscale {
+# Define function to configure enable or disable encryotion for dbatools usage
+function Disable-DbatoolsConfig {
     [CmdletBinding()]
     param (
-        [bool]$EnableTailscale
+        [bool]$DisableEncryption
     )
-    Write-Verbose "Starting Set-DbatoolsConfigForTailscale function..."
-    if ($EnableTailscale) {
+    Write-Verbose "Starting Set-DbatoolsConfig function..."
+    if ($DisableEncryption) {
         try {
             Set-DbatoolsConfig -FullName sql.connection.trustcert -Value $true -Register
             Set-DbatoolsConfig -FullName sql.connection.encrypt -Value $false -Register
+            Write-Log -Message "Configured dbatools to trust certificates and disable encryption." -Level INFO
         } catch {
             Write-Log -Message "Failed to set DbaToolsConfig. Error: $_" -Level ERROR
-        } finally {
-            Write-Verbose "Ending Set-DbatoolsConfigForTailscale function..."
+            throw $_
         }
+    } else {
+        Write-Log -Message "Encryption not disabled for dbatools connections." -Level INFO
     }
+    Write-Verbose "Ending Set-DbatoolsConfig function..."
 }
 
 # Define funtion to create a directory if it does not already exist.
@@ -224,7 +231,7 @@ function Validate-SystemDatabases {
     Write-Verbose "Starting Validate-SystemDatabases function..."
     Write-Verbose "Setting keys in Validate-SystemDatabases function..."
     $requiredKeys = @('Database', 'DataFileSizeMB', 'LogFileSizeMB', 'LogFileSizeKB', 'AllFilesGrowthMB', 'LogicalFileName')
-    Write-Verbose "Set keys in Validate-SystemDatabases function for <list databases here...>"
+    Write-Verbose "Set keys in Validate-SystemDatabases function for master, model, msdb..."
     
     foreach ($db in $SystemDatabases) {
         foreach ($key in $requiredKeys) {
@@ -234,19 +241,46 @@ function Validate-SystemDatabases {
             
             # Type checking
             switch ($key) {
-                'Database' { if ($db[$key] -isnot [string]) { throw "Database name must be a string" } }
-                {$_ -like '*FileSize*'} {
+                'Database' { 
+                    if ($db[$key] -isnot [string]) { 
+                        throw "Database name must be a string" 
+                    } 
+                }
+                'DataFileSizeMB' { 
                     if ($db[$key] -isnot [int] -or $db[$key] -lt 0) { 
                         throw "$key must be a non-negative integer for database $($db.Database)" 
+                    } 
+                }
+                'LogFileSizeMB' { 
+                    if ($db[$key] -isnot [int] -or $db[$key] -lt 0) { 
+                        throw "$key must be a non-negative integer for database $($db.Database)" 
+                    } 
+                }
+                'AllFilesGrowthMB' { 
+                    if ($db[$key] -isnot [int] -or $db[$key] -lt 0) { 
+                        throw "$key must be a non-negative integer for database $($db.Database)" 
+                    } 
+                }
+                'LogicalFileName' { 
+                    if ($db[$key] -isnot [string]) { 
+                        throw "LogicalFileName must be a string" 
+                    } 
+                }
+                'LogFileSizeKB' { 
+                    if ($db[$key] -isnot [scriptblock]) { 
+                        throw "$key must be a script block for database $($db.Database)" 
+                    }
+                    # Optionally, validate the script block output
+                    try {
+                        $value = & $db[$key]
+                        if ($value -isnot [int] -or $value -lt 0) {
+                            throw "$key script block must return a non-negative integer for database $($db.Database)"
+                        }
+                    } catch {
+                        throw "Invalid script block for $key in database $($db.Database): $_"
                     }
                 }
-                'LogicalFileName' { if ($db[$key] -isnot [string]) { throw "LogicalFileName must be a string" } }
             }
-        }
-
-        # Check if LogFileSizeKB is a script block
-        if ($db['LogFileSizeKB'] -isnot [scriptblock]) {
-            throw "LogFileSizeKB for $($db.Database) must be a script block"
         }
     }
 }
@@ -255,52 +289,34 @@ function Validate-SystemDatabases {
 function Set-SystemDatabaseSize {
     [CmdletBinding()]
     param (
-        [string]$Instance,
-        [hashtable]$SystemDatabase,
-        [PSCredential]$Credential
+        [Parameter(Mandatory=$true)][string]$Instance,
+        [Parameter(Mandatory=$true)][hashtable]$SystemDatabase,
+        [Parameter(Mandatory=$true)][PSCredential]$Credential
     )
     $SysDatabase = $SystemDatabase.Database
     $DataFileMB = $SystemDatabase.DataFileSizeMB
     $LogFileMB = $SystemDatabase.LogFileSizeMB
-    $LogFileKB = & $SystemDatabase.LogFileSizeKB
-    $FileGrowthMB = $SystemDatabase.AllFilesGrowthMB
+    $FileGrowth = $SystemDatabase.AllFilesGrowthMB
     $FileName = $SystemDatabase.LogicalFileName
-
-    # Set data file size
-    Write-Verbose "Setting '$dataFiles' for $SysDatabase in the Set-SystemDatabaseSize function..."
-    $dataFiles = Get-DbaDbFile -SqlInstance $Instance -Database $SysDatabase -SqlCredential $Credential | Where-Object {$_.TypeDescription -eq "ROWS"}
-    Write-Verbose "The '$dataFiles' variable for $SysDatabase has been set to $dataFiles..."
-    if ($dataFiles.Size -lt $DataFileMB) {
-        Invoke-DbaQuery -SqlInstance $Instance -Database $SysDatabase -SqlCredential $Credential -Query "ALTER DATABASE [$SysDatabase] MODIFY FILE ( NAME = N'$FileName', SIZE = $DataFileMB MB )"
+    try {
+        $dataFiles = Get-DbaDbFile -SqlInstance $Instance -Database $SysDatabase -ErrorAction Stop | Where-Object {$_.TypeDescription -eq "ROWS"}
+        if (-not $dataFiles) {
+            throw "No data files found for $SysDatabase on $Instance."
+        }
+        Invoke-DbaQuery -SqlInstance $Instance -Database $SysDatabase -Query "ALTER DATABASE [$SysDatabase] MODIFY FILE ( NAME = N'$FileName', SIZE = $DataFileMB MB )" -ErrorAction Stop
         Write-Log -Message "Set data file size for $SysDatabase on $Instance" -Level INFO
-    }
-
-    # Set log file size
-    Write-Verbose "Setting '$logFiles' for $SysDatabase in the Set-SystemDatabaseSize function..."
-    $logFiles = Get-DbaDbFile -SqlInstance $Instance -Database $SysDatabase -SqlCredential $Credential | Where-Object {$_.TypeDescription -eq "LOG"}
-    Write-Verbose "The '$logFiles' variable for $SysDatabase has been set to $logFiles..."
-    if ($logFiles.Size -lt $LogFileMB) {
-        Expand-DbaDbLogFile -SqlInstance $Instance -Database $SysDatabase -TargetLogSize $LogFileMB -SqlCredential $Credential
+        $logFiles = Get-DbaDbFile -SqlInstance $Instance -Database $SysDatabase -ErrorAction Stop | Where-Object {$_.TypeDescription -eq "LOG"}
+        if (-not $logFiles) {
+            throw "No log files found for $SysDatabase on $Instance."
+        }
+        Expand-DbaDbLogFile -SqlInstance $Instance -Database $SysDatabase -TargetLogSize $LogFileMB -ErrorAction Stop
         Write-Log -Message "Expanded log file size for $SysDatabase on $Instance" -Level INFO
+        Invoke-DbaQuery -SqlInstance $Instance -Database $SysDatabase -Query "ALTER DATABASE [$SysDatabase] MODIFY FILE ( NAME = N'$FileName', FILEGROWTH = $FileGrowth MB )" -ErrorAction Stop
+        Write-Log -Message "Set file growth for $SysDatabase on $Instance" -Level INFO
+    } catch {
+        Write-Log -Message "Failed to configure $SysDatabase on $Instance. Error: $_" -Level ERROR
+        throw $_
     }
-
-    # Set growth increment
-    Write-Verbose "Increasing file growth increments for $SysDatabase data and log files to $($FileGrowthMB)MB."
-    Set-DbaDbFileGrowth -SqlInstance $Instance -Database $SysDatabase -GrowthType MB -Growth $FileGrowthMB -FileType All -SqlCredential $Credential
-    Write-Log -Message "Set file growth for $SysDatabase on $Instance" -Level INFO
-}
-
-# Assuming the JSON file is in the same directory as your script
-Write-Verbose "Setting '$configFilePath'..."
-$configFilePath = Join-Path -Path $PSScriptRoot -ChildPath "SQLConfig.json"
-Write-Verbose "Set '$configFilePath' to $configFilePath..."
-
-if (Test-Path $configFilePath) {
-    Write-Verbose "Converting JSON config to hashtable..."
-    $ConfigParams = Get-Content -Path $configFilePath -Raw | ConvertFrom-Json | ConvertTo-Hashtable
-} else {
-    Write-Log -Message "Configuration file not found at $configFilePath. The installation cannot proceed." -Level ERROR
-    throw "Configuration file missing. Check $configFilePath."
 }
 
 # ConvertTo-Hashtable function to convert the JSON object to a hashtable since JSON does not natively support hashtables
@@ -327,6 +343,19 @@ function ConvertTo-Hashtable {
     }
 }
 
+# Assuming the JSON file is in the same directory as your script
+Write-Verbose "Setting '$configFilePath'..."
+$configFilePath = Join-Path -Path $PSScriptRoot -ChildPath "SQLConfig.json"
+Write-Verbose "Set '$configFilePath' to $configFilePath..."
+
+if (Test-Path $configFilePath) {
+    Write-Verbose "Converting JSON config to hashtable..."
+    $ConfigParams = Get-Content -Path $configFilePath -Raw | ConvertFrom-Json | ConvertTo-Hashtable
+} else {
+    Write-Log -Message "Configuration file not found at $configFilePath. The installation cannot proceed." -Level ERROR
+    throw "Configuration file missing. Check $configFilePath."
+}
+
 # Define function to set various SQL Server configuration points
 function Set-SqlServerConfigurations {
     [CmdletBinding()]
@@ -338,7 +367,7 @@ function Set-SqlServerConfigurations {
 
     foreach ($configName in $Configurations.Keys) {
         try {
-            Set-DbaSpConfigure -SqlInstance $Instance -SqlCredential $Credential -Name $configName -Value $Configurations[$configName] -EnableException
+            Set-DbaSpConfigure -SqlInstance $Instance -Name $configName -Value $Configurations[$configName] -EnableException
             Write-Log -Message "SQL Server configuration '$configName' set to $($Configurations[$configName]) on $Instance." -Level INFO
         } catch {
             Write-Log -Message "Failed to set configuration '$configName' on $Instance. Error: $_" -Level ERROR
@@ -350,10 +379,10 @@ function Set-SqlServerConfigurations {
 Write-Verbose "Ensuring script is running with Admin privileges..."
 EnsureAdminPrivileges
 
-Write-Verbose "Setting security config if using Tailscale..."
-Set-DbatoolsConfigForTailscale -EnableTailscale $ConnectWithTailScale
+Write-Verbose "Setting security config if disabling encryption..."
+Disable-DbatoolsConfig -DisableEncryption $DisableEncryption
 
-$ValidFeatures = @("SQLENGINE", "REPLICATION", "FULLTEXT", "AS", "ASADVANCED", "RS", "RS_SHAREPOINT", "IS", "PYTHON", "R", "BIDS", "CONN", "BC", "SDK", "DOCS", "TOOLS", "DREPLAY_CONTROLLER", "DREPLAY_CLIENT", "MDS", "DQC", "DQ", "POLYBASE", "MLSERVICES")
+$ValidFeatures = @("ENGINE", "REPLICATION", "FULLTEXT", "AS", "ASADVANCED", "RS", "RS_SHAREPOINT", "IS", "PYTHON", "R", "BIDS", "CONN", "BC", "SDK", "DOCS", "TOOLS", "DREPLAY_CONTROLLER", "DREPLAY_CLIENT", "MDS", "DQC", "DQ", "POLYBASE", "MLSERVICES")
 
 Write-Verbose "Creating required directories, if they don't already exist..."
 foreach ($directory in @($DataDirectory, $LogDirectory, $BackupDirectory)) {
@@ -372,30 +401,33 @@ if ($SystemDatabases) {
 }
 
 Write-Verbose "Starting installation on host servers..."
+Write-Log -Message "HostServers: $($HostServers -join ', ')" -Level INFO
+Write-Log -Message "Features: $($Features | ConvertTo-Json -Depth 2)" -Level INFO
+$successfulInstalls = @()
 foreach ($hostServer in $HostServers) {
+    Write-Log -Message "Processing host: $hostServer" -Level INFO
     $saCredential = Get-Credential -Message "Enter the 'sa' credentials for $hostServer"
-    $IntanceFeatures = $Features[$hostServer]    
-        if ($null -eq $IntanceFeatures) {
+    $InstanceFeatures = $Features[$hostServer]    
+    if ($null -eq $InstanceFeatures) {
         Write-Log -Message "No features specified for $hostServer. Skipping installation." -Level WARNING
         continue
     }
-
-    # Validate features
-    foreach ($feature in $IntanceFeatures) {
+    Write-Log -Message "Features for $($hostServer): $($InstanceFeatures -join ', ')" -Level INFO
+    foreach ($feature in $InstanceFeatures) {
         if ($feature -notin $ValidFeatures) {
             Write-Log -Message "Invalid feature '$feature' specified for $hostServer. Skipping this host." -Level ERROR
             continue
         }
     }
-
+    Write-Log -Message "Starting installation on $hostServer..." -Level INFO
     try {
         Install-DbaInstance -SqlInstance $hostServer `
             -Version $Version `
             -sacredential $saCredential `
             -Authentication $Authentication `
-            -Feature $IntanceFeatures `
+            -Feature $InstanceFeatures `
             -AuthenticationMode $AuthenticationMode `
-            -InstancePath $InstallPath `
+            -InstancePath $InstancePath `
             -DataPath $DataDirectory `
             -LogPath $LogDirectory `
             -TempPath $TempDBDirectory `
@@ -406,27 +438,48 @@ foreach ($hostServer in $HostServers) {
             -sqlcollation $SqlCollation `
             -PerformVolumeMaintenanceTasks `
             -Configuration $ConfigParams `
+            -Path $InstallMediaPath `
             -Restart `
             -EnableException
-        } catch {
-            Write-Log -Message "Failed to install SQL Server on $hostServer. Error: $_" -Level ERROR
-        }
+        Write-Log -Message "Successfully installed SQL Server on $hostServer." -Level INFO
+        $successfulInstalls += $hostServer
+    } catch {
+        Write-Log -Message "Failed to install SQL Server on $hostServer. Error: $_" -Level ERROR
+        continue  # Skip to next host instead of throwing
+    }
 }
 Write-Verbose "Finished installation on all host servers."
 
-# Set system database sizes
 Write-Verbose "Starting configuration of system databases' sizes and growth increments..."
-foreach ($Instance in $HostServers) {
-    foreach ($SystemDatabase in $SystemDatabases) {
-        Set-SystemDatabaseSize -Instance $Instance -SystemDatabase $SystemDatabase -Credential $myCredential
+if (-not $successfulInstalls) {
+    Write-Log -Message "No successful installations detected. Skipping system database configuration." -Level WARNING
+} else {
+    foreach ($Instance in $successfulInstalls) {
+        foreach ($SystemDatabase in $SystemDatabases) {
+            try {
+                Set-SystemDatabaseSize -Instance $Instance -SystemDatabase $SystemDatabase -Credential $myCredential
+            } catch {
+                Write-Log -Message "Failed to configure system database $($SystemDatabase.Database) on $Instance. Error: $_" -Level ERROR
+                throw $_
+            }
+        }
     }
 }
 Write-Verbose "Finished configuration of system databases' sizes and growth increments..."
 
 Write-Verbose "Starting various post-installation configurations..."
-foreach ($Instance in $HostServers) {
-    Set-SqlServerConfigurations -Instance $Instance -Configurations $PostInstallConfigurations -Credential $myCredential
+if (-not $successfulInstalls) {
+    Write-Log -Message "No successful installations detected. Skipping post-installation configurations." -Level WARNING
+} else {
+    foreach ($Instance in $successfulInstalls) {
+        try {
+            Set-SqlServerConfigurations -Instance $Instance -Configurations $PostInstallConfigurations -Credential $myCredential
+        } catch {
+            Write-Log -Message "Failed to apply post-installation configurations on $Instance. Error: $_" -Level ERROR
+            throw $_
+        }
+    }
 }
-Write-Verbose "Starting various post-installation configurations..."
+Write-Verbose "Finished various post-installation configurations..."
 
 Write-Log -Message "SQL Server installation and post-installation configuration has completed." -Level INFO
